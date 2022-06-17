@@ -46,7 +46,12 @@
 #include "lock.h"
 
 bool _FAT_findEntry(const char *path, DIR_ENTRY *dirEntry) {
+	bool r;
 	PARTITION *partition = _FAT_partition_getPartitionFromPath(path);
+
+	// Check Partition
+	if( !partition )
+		return false;
 
 	// Move the path pointer to the start of the actual path
 	if (strchr (path, ':') != NULL) {
@@ -57,23 +62,26 @@ bool _FAT_findEntry(const char *path, DIR_ENTRY *dirEntry) {
 	}
 
 	// Search for the file on the disc
-	return _FAT_directory_entryFromPath (partition, dirEntry, path, NULL);
-	
+	_FAT_lock(&partition->lock);
+	r = _FAT_directory_entryFromPath (partition, dirEntry, path, NULL);
+	_FAT_unlock(&partition->lock);
+
+	return r;
 }
 
 int	FAT_getAttr(const char *file) {
 	DIR_ENTRY dirEntry;
 	if (!_FAT_findEntry(file,&dirEntry)) return -1;
-	 
+
 	return dirEntry.entryData[DIR_ENTRY_attributes];
 }
 
-int FAT_setAttr(const char *file, int attr) {
+int FAT_setAttr(const char *file, uint8_t attr) {
 
 	// Defines...
 	DIR_ENTRY_POSITION entryEnd;
 	PARTITION *partition = NULL;
-	DIR_ENTRY* dirEntry = NULL;
+	DIR_ENTRY dirEntry;
 
 	// Get Partition
 	partition = _FAT_partition_getPartitionFromPath( file );
@@ -81,23 +89,24 @@ int FAT_setAttr(const char *file, int attr) {
 	// Check Partition
 	if( !partition )
 		return -1;
-	
+
 	// Move the path pointer to the start of the actual path
 	if (strchr (file, ':') != NULL)
 		file = strchr (file, ':') + 1;
 	if (strchr (file, ':') != NULL)
 		return -1;
 
-	// Get DIR_ENTRY
-	if( !_FAT_directory_entryFromPath (partition, dirEntry, file, NULL) )
-		return -1;
-
-	// Get Entry-End
-	entryEnd = dirEntry->dataEnd;
-
 	// Lock Partition
 	_FAT_lock(&partition->lock);
 
+	// Get DIR_ENTRY
+	if( !_FAT_directory_entryFromPath (partition, &dirEntry, file, NULL) ) {
+		_FAT_unlock(&partition->lock); // Unlock Partition
+		return -1;
+	}
+
+	// Get Entry-End
+	entryEnd = dirEntry.dataEnd;
 
 	// Write Data
 	_FAT_cache_writePartialSector (
@@ -222,7 +231,7 @@ int _FAT_open_r (struct _reent *r, void *fileStruct, const char *path, int flags
 				pathEnd += 1;
 			}
 			// Create the entry data
-			strncpy (dirEntry.filename, pathEnd, MAX_FILENAME_LENGTH - 1);
+			strncpy (dirEntry.filename, pathEnd, NAME_MAX - 1);
 			memset (dirEntry.entryData, 0, DIR_ENTRY_DATA_SIZE);
 
 			// Set the creation time and date
@@ -378,7 +387,7 @@ int _FAT_syncToDisc (FILE_STRUCT* file) {
 }
 
 
-int _FAT_close_r (struct _reent *r, int fd) {
+int _FAT_close_r (struct _reent *r, void *fd) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	int ret = 0;
 
@@ -415,7 +424,7 @@ int _FAT_close_r (struct _reent *r, int fd) {
 	return ret;
 }
 
-ssize_t _FAT_read_r (struct _reent *r, int fd, char *ptr, size_t len) {
+ssize_t _FAT_read_r (struct _reent *r, void *fd, char *ptr, size_t len) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	PARTITION* partition;
 	CACHE* cache;
@@ -598,7 +607,7 @@ static bool _FAT_check_position_for_next_cluster(struct _reent *r,
 	// do nothing if no more data to write
 	if (remain == 0) return true;
 	if (flagNoError && *flagNoError == false) return false;
-	if ((remain < 0) || (position->sector > partition->sectorsPerCluster)) {
+	if (position->sector > partition->sectorsPerCluster) {
 		// invalid arguments - internal error
 		r->_errno = EINVAL;
 		goto err;
@@ -709,7 +718,7 @@ static bool _FAT_file_extend_r (struct _reent *r, FILE_STRUCT* file) {
 	return true;
 }
 
-ssize_t _FAT_write_r (struct _reent *r, int fd, const char *ptr, size_t len) {
+ssize_t _FAT_write_r (struct _reent *r, void *fd, const char *ptr, size_t len) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	PARTITION* partition;
 	CACHE* cache;
@@ -937,7 +946,7 @@ ssize_t _FAT_write_r (struct _reent *r, int fd, const char *ptr, size_t len) {
 }
 
 
-off_t _FAT_seek_r (struct _reent *r, int fd, off_t pos, int dir) {
+off_t _FAT_seek_r (struct _reent *r, void *fd, off_t pos, int dir) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	PARTITION* partition;
 	uint32_t cluster, nextCluster;
@@ -1039,7 +1048,7 @@ off_t _FAT_seek_r (struct _reent *r, int fd, off_t pos, int dir) {
 
 
 
-int _FAT_fstat_r (struct _reent *r, int fd, struct stat *st) {
+int _FAT_fstat_r (struct _reent *r, void *fd, struct stat *st) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	PARTITION* partition;
 	DIR_ENTRY fileEntry;
@@ -1074,7 +1083,7 @@ int _FAT_fstat_r (struct _reent *r, int fd, struct stat *st) {
 	return 0;
 }
 
-int _FAT_ftruncate_r (struct _reent *r, int fd, off_t len) {
+int _FAT_ftruncate_r (struct _reent *r, void *fd, off_t len) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	PARTITION* partition;
 	int ret=0;
@@ -1186,7 +1195,7 @@ int _FAT_ftruncate_r (struct _reent *r, int fd, off_t len) {
 	return ret;
 }
 
-int _FAT_fsync_r (struct _reent *r, int fd) {
+int _FAT_fsync_r (struct _reent *r, void *fd) {
 	FILE_STRUCT* file = (FILE_STRUCT*)  fd;
 	int ret = 0;
 
